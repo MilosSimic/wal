@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"github.com/MilosSimic/fmmap"
+	"github.com/MilosSimic/lru"
 	"hash/crc32"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -31,6 +33,7 @@ type WAL struct {
 	d         time.Duration
 	lowMark   int
 	lastIndex int64
+	cache     *lru.LRU
 }
 
 type Segment struct {
@@ -99,14 +102,20 @@ func (wal *WAL) removeIndex(index int) {
 	wal.segments = append(wal.segments[:index], wal.segments[index+1:]...)
 }
 
-func NewWAL(path string, duration time.Duration, lowMark int) *WAL {
+func NewWAL(path string, duration time.Duration, lowMark int, cap int) (*WAL, error) {
+	cache, err := lru.NewLRU(cap, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	return &WAL{
 		path:      path,
 		segments:  []*Segment{},
 		d:         duration,
 		lowMark:   lowMark,
 		lastIndex: 0,
-	}
+		cache:     cache,
+	}, nil
 }
 
 func (wal *WAL) TailPath() (string, error) {
@@ -126,5 +135,28 @@ func (wal *WAL) Update(data []byte, s *Segment) error {
 		return err
 	}
 	s.Append(data, int64(len(data)))
+	return nil
+}
+
+func (wal *WAL) findInCache(index int64) ([]byte, error) {
+	key := strconv.Itoa(int(index))
+	v, ok := wal.cache.Get(key)
+	if !ok {
+		return nil, errors.New("Cache miss!")
+	}
+	val := v.(*lru.Elem).Value
+	s, ok := val.([]byte)
+	if !ok {
+		return nil, errors.New("Conversion error")
+	}
+	return s, nil
+}
+
+func (wal *WAL) cacheit(index int64, value []byte) error {
+	key := strconv.Itoa(int(index))
+	_, ok := wal.cache.Put(key, value)
+	if !ok {
+		return errors.New("Cache error")
+	}
 	return nil
 }

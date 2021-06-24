@@ -1,2 +1,4 @@
 github.com/MilosSimic/fmmap v0.0.0-20200407212656-17f570655904 h1:FVRbbnsYm5mDQJ25H+2DuemAnvOiovPfdXOM5yWvAqM=
 github.com/MilosSimic/fmmap v0.0.0-20200407212656-17f570655904/go.mod h1:bR65zcndu1Mitxpj56wskWqMTeVfuIG2QV+8oeJIN2M=
+github.com/MilosSimic/lru v0.0.0-20200407233216-7b1a2e7b95e5 h1:JYFpzAAtnmtsDe/bhUFITPaEWce55X8uZC5mOSZELNo=
+github.com/MilosSimic/lru v0.0.0-20200407233216-7b1a2e7b95e5/go.mod h1:C3GkA78f1RICgZyPtkmE3k9YN7yXpWmlLMGGRRl2Q0w=

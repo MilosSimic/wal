@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,6 +104,12 @@ func (wal *WAL) Read(index int64) ([]byte, error) {
 			return nil, err
 		}
 		return segment.getSegmentData()
+	}
+
+	// Test cache
+	cached, err := wal.findInCache(index)
+	if err == nil {
+		return cached, nil
 	}
 
 	//search in all segments
@@ -209,9 +216,14 @@ func (wal *WAL) findSegment(index int64) (*Segment, error) {
 	// Try to found last segment, if exists, otherwise create new segment and return as last
 	i := sort.Search(len(wal.segments), func(i int) bool { return index <= wal.segments[i].index })
 	if i < len(wal.segments) && wal.segments[i].index == index {
+		//segment exists, cache it for the next time
+		data, err := wal.segments[i].getSegmentData()
+		if err == nil {
+			wal.cacheit(index, data)
+		}
 		return wal.segments[i], nil
 	} else {
-		return nil, nil
+		return nil, errors.New("Segment do not exists")
 	}
 }
 
@@ -295,8 +307,12 @@ func (wal *WAL) clean(ctx context.Context) {
 }
 
 func main() {
-	wal := NewWAL("/Users/milossimic/Desktop/wal", time.Second, 2)
-	err := wal.Open()
+	wal, err := NewWAL("/Users/milossimic/Desktop/wal", time.Second, 2, 10)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	err = wal.Open()
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -305,28 +321,32 @@ func main() {
 		fmt.Println(s)
 	}
 
-	err = wal.Set([]*T{
-		&T{
-			"key",
-			[]byte{1, 6},
-			false,
-		},
-		// &T{
-		// 	"key2",
-		// 	[]byte{2, 7},
-		// 	false,
-		// },
-	})
-	if err != nil {
-		fmt.Println(err)
-	}
+	// err = wal.Set([]*T{
+	// 	&T{
+	// 		"key",
+	// 		[]byte{1, 6},
+	// 		false,
+	// 	},
+	// 	// &T{
+	// 	// 	"key2",
+	// 	// 	[]byte{2, 7},
+	// 	// 	false,
+	// 	// },
+	// })
+	// if err != nil {
+	// 	fmt.Println(err)
+	// }
 
-	s, err := wal.ReadConverted(1)
-	if err != nil {
-		fmt.Println(err)
-	}
-	for _, v := range s {
-		fmt.Println(v)
+	i := 0
+	for i < 3 {
+		s, err := wal.ReadConverted(1)
+		if err != nil {
+			fmt.Println(err)
+		}
+		for _, v := range s {
+			fmt.Println(v)
+		}
+		i = i + 1
 	}
 
 	wal.Close()
