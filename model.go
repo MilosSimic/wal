@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"github.com/MilosSimic/fmmap"
 	"hash/crc32"
 	"os"
 	"sync"
@@ -22,23 +24,20 @@ const (
 )
 
 type WAL struct {
-	mu          sync.Mutex
-	path        string
-	segments    []*Segment
-	tail        *os.File
-	maxSize     int64
-	d           time.Duration
-	lowMark     int
-	lastIndex   int64
-	lastSegment *Segment
+	mu        sync.Mutex
+	path      string
+	segments  []*Segment
+	tail      *fmmap.FMMAP
+	d         time.Duration
+	lowMark   int
+	lastIndex int64
 }
 
 type Segment struct {
-	path   string
-	index  int64
-	size   int64
-	data   []byte
-	synced bool
+	path  string
+	index int64
+	size  int64
+	data  []byte
 }
 
 type Entry struct {
@@ -47,6 +46,12 @@ type Entry struct {
 	Deleted   bool
 	Key       string
 	Value     []byte
+}
+
+type T struct {
+	Key     string
+	Value   []byte
+	Deleted bool
 }
 
 func (s *Segment) Size() int64 {
@@ -68,14 +73,6 @@ func (s *Segment) SetData(data []byte) {
 func (s *Segment) Append(data []byte, size int64) {
 	s.data = append(s.data, data...)
 	s.size = s.size + size
-}
-
-func (s *Segment) SetSynced(synced bool) {
-	s.synced = synced
-}
-
-func (s *Segment) IsSynced() bool {
-	return s.synced
 }
 
 func (s *Segment) Index() int64 {
@@ -100,4 +97,34 @@ func (wal *WAL) AppendSegment(segment *Segment) {
 
 func (wal *WAL) removeIndex(index int) {
 	wal.segments = append(wal.segments[:index], wal.segments[index+1:]...)
+}
+
+func NewWAL(path string, duration time.Duration, lowMark int) *WAL {
+	return &WAL{
+		path:      path,
+		segments:  []*Segment{},
+		d:         duration,
+		lowMark:   lowMark,
+		lastIndex: 0,
+	}
+}
+
+func (wal *WAL) TailPath() (string, error) {
+	if wal.tail == nil {
+		return "", errors.New("no tail file")
+	}
+	return wal.tail.GetFile().Name(), nil
+}
+
+func open(path string) (*fmmap.FMMAP, error) {
+	return fmmap.NewFile(path, os.O_RDWR|os.O_CREATE)
+}
+
+func (wal *WAL) Update(data []byte, s *Segment) error {
+	err := wal.tail.Update(data)
+	if err != nil {
+		return err
+	}
+	s.Append(data, int64(len(data)))
+	return nil
 }

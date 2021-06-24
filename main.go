@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,73 +114,34 @@ func (wal *WAL) Read(index int64) ([]byte, error) {
 }
 
 func (wal *WAL) ReadConverted(index int64) ([]Entry, error) {
-	// Test the last segment first
-	if index >= wal.lastIndex {
-		segment, err := wal.getLastSegment()
-		if err != nil {
-			return nil, err
-		}
-		bytes, err := segment.getSegmentData()
-		if err != nil {
-			return nil, err
-		}
-		return wal.convert(bytes), nil
-	}
-
-	//search in all segments
-	segment, err := wal.findSegment(index)
-	if err != nil {
-		return nil, err
-	}
-	bytes, err := segment.getSegmentData()
+	bytes, err := wal.Read(index)
 	if err != nil {
 		return nil, err
 	}
 	return wal.convert(bytes), nil
 }
 
-func (wal *WAL) Set(key string, value []byte, deleted bool) error {
-	data := wal.Process(key, value, deleted)
-	dataSize := int64(len(data))
-	tail, err := wal.getLastSegment()
+func (wal *WAL) Set(ts []*T) error {
+	tail, err := wal.newSegment()
 	if err != nil {
-		if tail.Size()+dataSize <= wal.maxSize {
-			tail.Append(data, dataSize)
-			tail.SetSynced(false)
-		} else {
-			//Flush previos segment data to disk
-			if !tail.IsSynced() {
-				wal.Flush()
-				tail.SetSynced(true)
-			}
+		return err
+	}
 
-			//Create new segment and append data
-			newTail, err := wal.newSegment()
-			if err != nil {
-				return err
-			}
-
-			newTail.Append(data, dataSize)
+	data := []byte{}
+	if len(ts) == 1 {
+		t := ts[0]
+		data = append(data, wal.Process(t.Key, t.Value, t.Deleted)...)
+	} else {
+		for _, t := range ts {
+			part := wal.Process(t.Key, t.Value, t.Deleted)
+			data = append(data, part...)
 		}
 	}
-	return err
-}
-
-func (wal *WAL) Flush() error {
-	tail, err := wal.getLastSegment()
+	err = wal.Update(data, tail)
 	if err != nil {
-		n, err := wal.tail.Write(tail.Data())
-		if err != nil {
-			return err
-		}
-
-		if int64(n) != tail.Size() {
-			return errors.New("Error writing data to segment file")
-		}
-
-		fmt.Println("Flush!!")
+		return err
 	}
-	return err
+	return nil
 }
 
 func (wal *WAL) Open() error {
@@ -215,10 +174,9 @@ func (wal *WAL) Open() error {
 		}
 
 		segment := &Segment{
-			path:   path,
-			index:  i,
-			size:   fi.Size(),
-			synced: true,
+			path:  path,
+			index: i,
+			size:  fi.Size(),
 		}
 		wal.AppendSegment(segment)
 		return nil
@@ -229,21 +187,12 @@ func (wal *WAL) Open() error {
 	return wal.setupLastSegment()
 }
 
-func (tail *Segment) loadSegmentData() error {
-	data, err := ioutil.ReadFile(tail.path)
-	if err != nil {
-		return err
-	}
-	tail.SetData(data)
-	return nil
-}
-
 func (tail *Segment) getSegmentData() ([]byte, error) {
-	data, err := ioutil.ReadFile(tail.path)
+	mmap, err := open(tail.Path())
 	if err != nil {
 		return nil, err
 	}
-	return data, nil
+	return mmap.Get(), nil
 }
 
 func (wal *WAL) getLastSegment() (*Segment, error) {
@@ -270,32 +219,29 @@ func (wal *WAL) setupLastSegment() error {
 	lastSegment, err := wal.getLastSegment()
 	if err == nil {
 		//Open file
-		wal.tail, err = os.OpenFile(lastSegment.Path(), os.O_WRONLY, 0666) // open as WRITE ONLY
+		wal.tail, err = open(lastSegment.Path())
 		if err != nil {
 			return err
 		}
 
-		// Set that data will be appended to file
-		if _, err = wal.tail.Seek(0, 2); err != nil { // append only to end of file
-			return err
-		}
-
 		//Fill data to memory from last segment
-		lastSegment.loadSegmentData()
+		lastSegment.SetData(wal.tail.Get())
 	}
 	return err
 }
 
 func (wal *WAL) newSegment() (*Segment, error) {
-	//Close the previous tail file
-	prevTail := wal.tail.Name()
-	wal.tail.Close()
+	prevTail, err := wal.TailPath()
+	if err == nil {
+		//Close the previous tail file
+		wal.tail.Close()
 
-	//Rename previous last segment and remove _END mark and append to new one
-	regularPath := strings.Replace(prevTail, END_EXT, "", -1)
-	err := os.Rename(prevTail, regularPath)
-	if err != nil {
-		return nil, err
+		//Rename previous last segment and remove _END mark and append to new one
+		regularPath := strings.Replace(prevTail, END_EXT, "", -1)
+		err := os.Rename(prevTail, regularPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	//Create new segment file and assign to tail
@@ -306,15 +252,14 @@ func (wal *WAL) newSegment() (*Segment, error) {
 	temp = strings.Join([]string{temp, END_EXT}, "")
 	temp = strings.Join([]string{temp, WAL_EXT}, ".")
 
-	wal.tail, err = os.Create(temp)
+	wal.tail, err = open(temp)
 	if err != nil {
 		return nil, err
 	}
 
 	segment := &Segment{
-		index:  index,
-		path:   temp,
-		synced: false,
+		index: index,
+		path:  temp,
 	}
 
 	wal.lastIndex = index
@@ -349,34 +294,34 @@ func (wal *WAL) clean(ctx context.Context) {
 	}()
 }
 
-func NewWAL(path string, maxSize int64, duration time.Duration, lowMark int) *WAL {
-	return &WAL{
-		path:      path,
-		segments:  []*Segment{},
-		maxSize:   maxSize,
-		d:         duration,
-		lowMark:   lowMark,
-		lastIndex: -1,
-	}
-}
-
 func main() {
-	wal := NewWAL("/Users/milossimic/Desktop/wal", 100, time.Second, 2) //20971520) //20MB segment size
+	wal := NewWAL("/Users/milossimic/Desktop/wal", time.Second, 2)
 	err := wal.Open()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	// for _, s := range wal.Segments() {
-	// 	fmt.Println(s)
-	// }
+	for _, s := range wal.Segments() {
+		fmt.Println(s)
+	}
 
-	// wal.Set("key", []byte{1, 6}, false)
-	// wal.Set("key1", []byte{1, 6}, false)
-	// wal.Set("key2", []byte{1, 6}, false)
-	// fmt.Println(wal.TailSegment().Data())
+	err = wal.Set([]*T{
+		&T{
+			"key",
+			[]byte{1, 6},
+			false,
+		},
+		// &T{
+		// 	"key2",
+		// 	[]byte{2, 7},
+		// 	false,
+		// },
+	})
+	if err != nil {
+		fmt.Println(err)
+	}
 
-	s, err := wal.ReadConverted(2)
+	s, err := wal.ReadConverted(1)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -384,6 +329,5 @@ func main() {
 		fmt.Println(v)
 	}
 
-	// wal.Flush()
 	wal.Close()
 }
